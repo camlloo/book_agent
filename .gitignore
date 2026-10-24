@@ -1,0 +1,14 @@
+**/target/
+**/node_modules/
+**/dist/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.idea/
+.env
+.env.local
+ai/config.local.yaml
+*.log
+.impeccable/review/
+.impeccable/mocks/
+.impeccable/build/

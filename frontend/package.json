@@ -1,0 +1,30 @@
+{
+  "name": "book-agent-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "diff": "^8.0.2",
+    "dompurify": "^3.2.7",
+    "element-plus": "^2.11.4",
+    "lucide-vue-next": "^0.468.0",
+    "marked": "^16.4.0",
+    "pinia": "^3.0.3",
+    "vue": "^3.5.22",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "jsdom": "^26.1.0",
+    "unplugin-vue-components": "^32.1.0",
+    "vite": "^7.1.9",
+    "vitest": "^3.2.4"
+  }
+}

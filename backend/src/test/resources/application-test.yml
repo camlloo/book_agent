@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:bookagent;MODE=MySQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=USER;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+  sql:
+    init:
+      schema-locations: classpath:test-schema.sql
+minio:
+  enabled: false
+book-agent:
+  internal-token: integration-test-internal-token
+  dispatch-enabled: false

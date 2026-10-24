@@ -1,0 +1,46 @@
+# Ordered routes, environment variable names only; never put API keys in this file.
+channels:
+  - name: dashscope
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    model: qwen3.8-flash
+    # Conservative application budget; tokenizer estimates include 15% headroom.
+    context_window: 32768
+    input_token_budget: 24000
+    token_safety_ratio: 1.15
+    tasks: [OUTLINE, DRAFT, POLISH, ASK]
+    extra_body:
+      enable_thinking: false
+  - name: deepseek
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-chat
+    tasks: [OUTLINE, DRAFT, POLISH, ASK]
+  - name: qwen
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: QWEN_API_KEY
+    model: qwen-plus
+    tasks: [OUTLINE, DRAFT, POLISH, ASK]
+  - name: glm
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key_env: GLM_API_KEY
+    model: glm-4-plus
+    tasks: [OUTLINE, DRAFT, POLISH, ASK]
+  - name: ollama
+    base_url: http://127.0.0.1:11434/v1
+    api_key_env: OLLAMA_API_KEY
+    model: qwen3:8b
+    context_window: 4096
+    tasks: [OUTLINE, DRAFT, POLISH, ASK]
+    enabled_env: OLLAMA_ENABLED
+# Optional semantic retrieval. Configure all four environment variables to enable it.
+embedding:
+  base_url_env: EMBEDDING_BASE_URL
+  api_key_env: EMBEDDING_API_KEY
+  model_env: EMBEDDING_MODEL
+  dimensions_env: EMBEDDING_DIMENSIONS
+  # Dedicated embedding model; chat models do not produce retrieval vectors.
+  default_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  default_api_key_env: DASHSCOPE_API_KEY
+  default_model: text-embedding-v4
+  default_dimensions: 1024
