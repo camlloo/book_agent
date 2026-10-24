@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createApp, nextTick, reactive } from "vue";
 import { createMemoryHistory, createRouter } from "vue-router";
 import Reader from "./Reader.vue";
-import { api } from "../api";
+import { api, streamApi } from "../api";
 
-vi.mock("../api", () => ({ api: vi.fn(), query: () => "pageNum=1", date: value => value || "2026-10-21", flatten: value => value }));
+vi.mock("../api", () => ({ api: vi.fn(), streamApi: vi.fn(), query: () => "pageNum=1", date: value => value || "2026-10-21", flatten: value => value }));
 const auth = reactive({ user: { id: 1 } });
 vi.mock("../stores/auth", () => ({ useAuth: () => auth }));
 const scope = { bookIds: [30], publicOnly: true };
@@ -23,7 +23,7 @@ async function mount(path = "/books/30") {
 const click = label => { const target = [...host.querySelectorAll("button")].find(button => button.getAttribute("aria-label") === label || button.textContent.trim() === label); expect(target, label).toBeTruthy(); target.click(); };
 const transcript = () => host.querySelector(".reader-chat-scroll")?.textContent;
 beforeEach(() => {
-  auth.user = { id: 1 }; api.mockReset(); localStorage.clear(); sessionStorage.clear();
+  auth.user = { id: 1 }; api.mockReset(); streamApi.mockReset(); localStorage.clear(); sessionStorage.clear();
   vi.stubGlobal("matchMedia", () => ({ matches: false, onchange: null }));
   vi.stubGlobal("IntersectionObserver", class { observe() {} disconnect() {} });
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} unobserve() {} });
@@ -35,9 +35,12 @@ beforeEach(() => {
     if (url.startsWith("/api/conversations?")) return Promise.resolve([summary(2), summary(1)]);
     if (url === "/api/conversations" && options?.method === "POST") return Promise.resolve({ id: 3 });
     if (url === "/api/conversations") return Promise.resolve([summary(2), summary(1)]);
-    if (url.endsWith("/messages")) return Promise.resolve({ answer: "新回答", sources: [] });
     if (options?.method === "DELETE") return Promise.resolve(null);
     return Promise.resolve(detail(Number(url.split("/").at(-1))));
+  });
+  streamApi.mockImplementation((url, options) => {
+    options?.onEvent?.("delta", { text: "流式" });
+    return Promise.resolve({ answer: "新回答", sources: [] });
   });
 });
 afterEach(() => { app?.unmount(); host?.remove(); vi.unstubAllGlobals(); });
@@ -49,7 +52,7 @@ it("opens separate conversations with the same Book scope and resumes the chosen
   expect(router.currentRoute.value.query.conversation).toBe("1");
   const input = host.querySelector("#reader-question"); input.value = "继续解释"; input.dispatchEvent(new Event("input", { bubbles: true })); await nextTick();
   click("发送问题"); await settle();
-  expect(api).toHaveBeenCalledWith("/api/conversations/1/messages", expect.objectContaining({ body: { question: "继续解释" } }));
+  expect(streamApi).toHaveBeenCalledWith("/api/conversations/1/messages/stream", expect.objectContaining({ body: { question: "继续解释" } }));
 });
 
 it("starts a fresh conversation without deleting or reloading the prior one", async () => {
@@ -59,7 +62,22 @@ it("starts a fresh conversation without deleting or reloading the prior one", as
   const input = host.querySelector("#reader-question"); input.value = "怎样定义函数？"; input.dispatchEvent(new Event("input", { bubbles: true })); await nextTick();
   click("发送问题"); await settle(); await settle();
   expect(api).toHaveBeenCalledWith("/api/conversations", expect.objectContaining({ body: expect.objectContaining({ title: "怎样定义函数？", bookIds: [30] }) }));
-  expect(api).toHaveBeenCalledWith("/api/conversations/3/messages", expect.anything());
+  expect(streamApi).toHaveBeenCalledWith("/api/conversations/3/messages/stream", expect.anything());
+});
+
+it("shows the streamed preview while generating and replaces it with the final answer", async () => {
+  await mount(); click("新建对话"); await settle();
+  let emit, finish;
+  streamApi.mockImplementation((url, options) => new Promise(done => { emit = options.onEvent; finish = done; }));
+  const input = host.querySelector("#reader-question"); input.value = "怎样定义函数？"; input.dispatchEvent(new Event("input", { bubbles: true })); await nextTick();
+  click("发送问题"); await settle(); await settle();
+  emit("delta", { text: "部分结" }); emit("delta", { text: "论" }); await nextTick();
+  expect(transcript()).toContain("部分结论");
+  emit("reset", {}); await nextTick();
+  expect(transcript()).not.toContain("部分结论");
+  finish({ answer: "完整回答", sources: [] }); await settle(); await settle();
+  expect(transcript()).toContain("完整回答");
+  expect(host.querySelector(".reader-chat-preview")).toBeNull();
 });
 
 it("restores a linked conversation with its original multi-Book scope", async () => {
@@ -111,7 +129,7 @@ it("a pending automatic restore cannot repopulate a new empty conversation", asy
   expect(transcript()).not.toContain("回答 2");
   const input = host.querySelector("#reader-question"); input.value = "新问题"; input.dispatchEvent(new Event("input", { bubbles: true })); await nextTick();
   click("发送问题"); await settle();
-  expect(api).toHaveBeenCalledWith("/api/conversations/3/messages", expect.anything());
+  expect(streamApi).toHaveBeenCalledWith("/api/conversations/3/messages/stream", expect.anything());
 });
 
 it("removing a history link cancels a late restoration instead of reopening it", async () => {

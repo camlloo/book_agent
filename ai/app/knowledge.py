@@ -8,7 +8,7 @@ from .models import ChatMessage
 from .book_rag import BookVectorStore, IndexNotReady
 from .retrieval import tokens
 from .provider import ModelUnavailable
-from .answers import grounded_answer, empty_answer
+from .answers import grounded_answer, grounded_answer_stream, empty_answer
 from .context import bounded_evidence, history_context, tokens as count_tokens
 from .context_memory import ConversationMemory
 
@@ -87,7 +87,8 @@ async def search(request, provider):
     return {"results":output,"mode":request.search_mode,"rerankMode":rerank_mode}
 
 
-async def answer(request, provider):
+async def _prepare_answer(request, provider):
+    """Shared retrieval for answer() and answer_stream()."""
     query = request.question
     history, intent, context_stats = history_context([item.model_dump() for item in request.history], query,
         request.memory.model_dump() if request.memory else None)
@@ -99,8 +100,28 @@ async def answer(request, provider):
     retrieved = await search(request.model_copy(update={"question":query}), provider)
     sources = [{**row,"citation":i+1} for i,row in enumerate(bounded_evidence(retrieved["results"], query=query))]
     context_stats["evidenceTokens"] = sum(count_tokens(row["excerpt"]) for row in sources)
-    if not sources: return {"answer":empty_answer("当前有权知识范围"),"sources":[],"mode":request.search_mode,"rerankMode":retrieved["rerankMode"],"context":context_stats}
     evidence = "\n\n".join(f"[{row['citation']}] 《{row['bookTitle']}》 {row['sourceName']} 页码 {row['page'] or '无'}\n{row['excerpt']}" for row in sources)
     instruction = {"qa":"回答问题", "summary":"综合所提供的不同文档，按共同主题总结，注明覆盖范围与缺少的依据", "compare":"比较所提供的文档或方案，分别列出差异、适用情形及依据不足之处"}[request.mode]
+    return sources, retrieved, context_stats, history, intent, evidence, instruction
+
+
+async def answer(request, provider):
+    sources, retrieved, context_stats, history, intent, evidence, instruction = await _prepare_answer(request, provider)
+    if not sources: return {"answer":empty_answer("当前有权知识范围"),"sources":[],"mode":request.search_mode,"rerankMode":retrieved["rerankMode"],"context":context_stats}
     result = await grounded_answer(provider,instruction+"："+request.question,evidence,len(sources),f"当前已授权且就绪的 {len(request.scopes)} 本 Book",history=history,source_keys=[(row["bookId"],row["fileId"],row["page"]) for row in sources],conversation_context=intent)
     return {"answer":result,"sources":sources,"mode":request.search_mode,"rerankMode":retrieved["rerankMode"],"context":context_stats}
+
+
+async def answer_stream(request, provider):
+    """Streams preview deltas and ends with the same full result dict as answer()."""
+    sources, retrieved, context_stats, history, intent, evidence, instruction = await _prepare_answer(request, provider)
+    if not sources:
+        yield ("final", {"answer":empty_answer("当前有权知识范围"),"sources":[],"mode":request.search_mode,"rerankMode":retrieved["rerankMode"],"context":context_stats})
+        return
+    async for kind, value in grounded_answer_stream(provider, instruction+"："+request.question, evidence, len(sources),
+            f"当前已授权且就绪的 {len(request.scopes)} 本 Book", history=history,
+            source_keys=[(row["bookId"], row["fileId"], row["page"]) for row in sources], conversation_context=intent):
+        if kind == "final":
+            yield ("final", {"answer": value, "sources": sources, "mode": request.search_mode, "rerankMode": retrieved["rerankMode"], "context": context_stats})
+        else:
+            yield (kind, value)

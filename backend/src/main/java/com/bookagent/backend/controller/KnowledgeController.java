@@ -19,5 +19,7 @@ public class KnowledgeController {
     @GetMapping("/api/conversations/{id}")public Result<?> detail(@PathVariable long id){return Result.ok(conversations.detail(id));}
     public record Message(@NotBlank @Size(max=500) String question){}
     @PostMapping("/api/conversations/{id}/messages")public Result<?> send(@PathVariable long id,@Valid @RequestBody Message body){return Result.ok(conversations.send(id,body.question()));}
+    @PostMapping(value="/api/conversations/{id}/messages/stream",produces="text/event-stream")
+    public void sendStream(@PathVariable long id,@Valid @RequestBody Message body,jakarta.servlet.http.HttpServletResponse response) throws java.io.IOException{conversations.sendStream(id,body.question(),response);}
     @DeleteMapping("/api/conversations/{id}")public Result<?> delete(@PathVariable long id){conversations.delete(id);return Result.ok();}
 }

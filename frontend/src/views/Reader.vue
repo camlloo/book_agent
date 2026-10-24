@@ -29,7 +29,7 @@ import {
   History,
   SquarePen,
 } from "lucide-vue-next";
-import { api, query, date, flatten } from "../api";
+import { api, streamApi, query, date, flatten } from "../api";
 import { useAuth } from "../stores/auth";
 import Markdown from "../components/Markdown.vue";
 import CitedAnswer from "../components/CitedAnswer.vue";
@@ -427,7 +427,7 @@ async function send(value) {
   if(!question||chat.busy||!canAsk.value)return;
   const work=readerSession.operation(),id=route.params.id,custom=!!restoredScope.value||!!selectedBookIds.value.length,
     title=custom?scope.value:document.value?.title||'',privateScope=privateAccess.value,selection=chatSelection();
-  chat.busy=true;chat.error='';
+  chat.busy=true;chat.error='';chat.streamPreview='';
   let userMessage;
   try {
     if(chat.historyLoading)await chat.historyLoading;
@@ -444,14 +444,21 @@ async function send(value) {
         if(conversation.value===chat)await router.replace({query:{...route.query,conversation:created.id}});
         if(!work.current())return;
       }
-      result=await api(`/api/conversations/${chat.sessionId}/messages`,{method:'POST',body:{question:retrievalQuestion}});
+      result=await streamApi(`/api/conversations/${chat.sessionId}/messages/stream`,{
+        body:{question:retrievalQuestion},
+        onEvent:(name,data)=>{
+          if(!work.current()||conversation.value!==chat)return;
+          if(name==='delta'){chat.streamPreview+=data.text;scrollChat();}
+          else if(name==='reset')chat.streamPreview='';
+        },
+      });
     } else if(custom) result=await api('/api/blog/knowledge/ask',{method:'POST',body:{question:retrievalQuestion,bookIds:selection.bookIds,history,topK:5,searchMode:'hybrid',rerank:true,mode:'qa'}});
     else result=await api(`${privateScope?'/api/books':'/api/blog/books'}/${id}/ask`,{method:'POST',body:{question:retrievalQuestion,history,topK:5}});
     if(!work.current())return;
     chat.messages.push({role:'assistant',content:result.answer,sources:result.sources||[],bookTitle:title});
     syncChatCopies(chat);
   }catch(e){if(work.current()){if(userMessage)userMessage.failed=true;chat.error=e.message;chat.question=question;}}
-  finally{if(work.current()){chat.busy=false;if(conversation.value===chat)scrollChat();}}
+  finally{if(work.current()){chat.busy=false;chat.streamPreview='';if(conversation.value===chat)scrollChat();}}
 }
 function enter(event) {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -966,7 +973,15 @@ onUnmounted(() => {
           <CitedAnswer v-else :content="message.content" :sources="message.sources"
             :book-title="message.bookTitle || document?.title" @cite="cite" />
         </article>
-        <p v-if="conversation.busy" class="reader-chat-thinking" role="status">
+        <article
+          v-if="conversation.busy && conversation.streamPreview"
+          class="reader-chat-message assistant reader-chat-streaming"
+          aria-live="polite"
+        >
+          <span class="reader-message-role">阅读助手</span>
+          <p class="reader-chat-preview">{{ conversation.streamPreview }}</p>
+        </article>
+        <p v-else-if="conversation.busy" class="reader-chat-thinking" role="status">
           <span></span>正在阅读相关内容…
         </p>
         <p v-if="conversation.error" class="reader-chat-error" role="alert">

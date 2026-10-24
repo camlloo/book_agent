@@ -645,6 +645,14 @@
   border-radius: 50%;
   background: var(--r-accent);
 }
+.reader-chat-preview {
+  font-size: 13px;
+  line-height: 1.85;
+  color: var(--r-ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
 .reader-chat-error {
   font-size: 12px;
   color: #a33740;

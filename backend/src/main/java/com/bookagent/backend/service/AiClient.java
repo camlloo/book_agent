@@ -37,4 +37,41 @@ public class AiClient {
         } catch(BusinessException e){throw e;} catch(InterruptedException e){Thread.currentThread().interrupt();throw new BusinessException(503,"AI 请求已中断");}
         catch(Exception e){throw new BusinessException(503,"无法连接 AI 服务，请检查服务和模型配置");}
     }
+
+    /** Consumes an AI server-sent-event stream; handler exceptions abort the transfer. */
+    public void stream(String path,Object payload,java.util.function.BiConsumer<String,JsonNode> handler) {
+        if(token.isBlank()) throw new BusinessException(503,"请先配置 INTERNAL_TOKEN");
+        try {
+            var request=HttpRequest.newBuilder(URI.create(url+path)).timeout(Duration.ofMinutes(5))
+                .header("Content-Type","application/json").header("X-Internal-Token",token).header("Accept","text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload))).build();
+            var response=http.send(request,HttpResponse.BodyHandlers.ofLines());
+            if(response.statusCode()!=200) {
+                String message="AI 服务未就绪或模型调用失败，请检查 AI 服务配置与日志";
+                try { var detail=json.readTree(String.join("\n",response.body().toList())).path("detail"); if(detail.isTextual()) message=detail.asText(); } catch(Exception ignored) {}
+                throw new BusinessException(503,message);
+            }
+            var event=new String[]{null}; var data=new StringBuilder();
+            var lines=response.body();
+            try {
+                for(var it=lines.iterator();it.hasNext();) {
+                    var line=it.next();
+                    if(line==null) continue;
+                    if(line.isBlank()) {
+                        if(data.length()>0) emit(event[0],data.toString(),handler);
+                        event[0]=null; data.setLength(0);
+                    } else if(line.startsWith("event:")) event[0]=line.substring(6).trim();
+                    else if(line.startsWith("data:")) { if(data.length()>0) data.append('\n'); data.append(line.substring(5).stripLeading()); }
+                }
+                if(data.length()>0) emit(event[0],data.toString(),handler);
+            } finally { lines.close(); }
+        } catch(BusinessException e){throw e;} catch(InterruptedException e){Thread.currentThread().interrupt();throw new BusinessException(503,"AI 请求已中断");}
+        catch(Exception e){throw new BusinessException(503,"无法连接 AI 服务，请检查服务和模型配置");}
+    }
+
+    private void emit(String name,String payload,java.util.function.BiConsumer<String,JsonNode> handler) {
+        JsonNode data;
+        try { data=json.readTree(payload); } catch(Exception e){ return; }
+        handler.accept(name==null?"message":name,data);
+    }
 }

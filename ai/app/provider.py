@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import threading
@@ -92,6 +93,80 @@ class Provider:
                     except (httpx.HTTPError, ValueError, KeyError, IndexError):
                         # Do not log response bodies, headers or keys.
                         logger.warning("Model channel %s attempt %s failed", channel["name"], attempt + 1)
+                        if attempt == 0:
+                            await asyncio.sleep(0.4)
+        if truncated:
+            raise ModelUnavailable("模型输出达到长度上限，本次未返回完整结果，请按章节处理长文。")
+        if overflow:
+            raise ModelUnavailable("输入上下文超过可用模型预算，请按章节处理长文或减少知识范围。")
+        raise ModelUnavailable("没有可用模型渠道，请配置密钥或启用本地 Ollama。")
+
+    async def complete_stream(self, task: str, system: str, user: str, history=None):
+        """Stream answer deltas over the same channel routing as complete().
+
+        Channel fallback only happens before the first delta: once text reached the
+        caller, a broken stream must surface as an error instead of restarting on
+        another channel and mixing two partial generations.
+        """
+        overflow = False
+        truncated = False
+        for channel in self.config.get("channels", []):
+            route = "ASK" if task in ("MEMORY", "REWRITE") else task
+            if route not in channel.get("tasks", []):
+                continue
+            enabled_env = channel.get("enabled_env")
+            if enabled_env and os.getenv(enabled_env, "").lower() != "true":
+                continue
+            key = os.getenv(channel["api_key_env"], "")
+            if not key and not enabled_env:
+                continue
+            try:
+                _, messages, output_limit, context_stats = fit_messages(system, user, history or [], channel, task)
+            except ContextOverflow:
+                overflow = True
+                logger.warning("Model channel %s context budget exceeded for %s", channel["name"], task)
+                continue
+            emitted = 0
+            async with httpx.AsyncClient(timeout=65, transport=self.transport) as client:
+                for attempt in range(2):
+                    try:
+                        async with client.stream("POST",
+                            channel["base_url"].rstrip("/") + "/chat/completions",
+                            headers={"Authorization": f"Bearer {key or 'ollama'}"},
+                            json={**channel.get("extra_body", {}), "model": channel["model"], "messages": messages,
+                                "temperature": 0.4, "max_tokens": output_limit, "stream": True}) as response:
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data = line[5:].strip()
+                                if data == "[DONE]":
+                                    break
+                                try:
+                                    payload = json.loads(data)
+                                except ValueError:
+                                    continue
+                                choices = payload.get("choices") or []
+                                choice = choices[0] if choices else {}
+                                content = (choice.get("delta") or {}).get("content")
+                                if content:
+                                    emitted += len(content)
+                                    yield content
+                                if choice.get("finish_reason") == "length":
+                                    truncated = True
+                                    raise ValueError("truncated output")
+                        if not emitted:
+                            raise ValueError("empty output")
+                        logger.info("Model stream channel=%s task=%s estimated_input=%s input_budget=%s output_reserve=%s history_dropped=%s output_chars=%s",
+                            channel["name"], task, context_stats["estimatedInputTokens"], context_stats["inputBudget"], output_limit,
+                            context_stats["historyDropped"], emitted)
+                        return
+                    except (httpx.HTTPError, ValueError, KeyError, IndexError):
+                        logger.warning("Model stream channel %s attempt %s failed", channel["name"], attempt + 1)
+                        if emitted:
+                            if truncated:
+                                raise ModelUnavailable("模型输出达到长度上限，本次未返回完整结果，请按章节处理长文。") from None
+                            raise ModelUnavailable("回答流中断，请重新提问。") from None
                         if attempt == 0:
                             await asyncio.sleep(0.4)
         if truncated:

@@ -41,7 +41,11 @@ public class Conversations {
         }
         return result;
     }
-    public JsonNode send(long id,String question){
+    private record Pending(long id,JsonNode visible,List<ChatMessageDTO> history,String mode,List<Long> ids,boolean published,
+                           String searchMode,boolean rerank,List<Map<String,Object>> initialScopes,String scopeStamp,
+                           List<JsonNode> eligible,String historyStamp,String run,long message){}
+
+    private Pending begin(long id,String question){
         var conversation=require(id);var visible=detail(id);var history=new ArrayList<ChatMessageDTO>();
         for(var message:visible.path("messages"))if(message.path("status").asText().equals("SUCCEEDED")&&!message.path("redacted").asBoolean()){
             String content=message.path("content").asText();history.add(new ChatMessageDTO(message.path("role").asText(),content.substring(0,Math.min(4000,content.length()))));
@@ -57,23 +61,66 @@ public class Conversations {
             if(jdbc.update("UPDATE knowledge_conversation SET run_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND run_id IS NULL",run,id,access.actor())==0)throw new BusinessException(409,"该对话已有问题正在处理");
             return keys.insert("INSERT INTO knowledge_message(conversation_id,role,content,sources_json,status) VALUES(?,'user',?,'[]','RUNNING')",id,question);
         });
+        return new Pending(id,visible,history,(String)conversation.get("mode"),ids,scope.path("publicOnly").asBoolean(),
+            scope.path("searchMode").asText("hybrid"),scope.path("rerank").asBoolean(true),initialScopes,scopeStamp,eligible,historyStamp,run,message);
+    }
+
+    private void complete(Pending pending,ConversationMemory.Prepared prepared,JsonNode result){
+        ensureContext(pending.id(),pending.initialScopes(),pending.ids(),pending.published(),pending.historyStamp(),pending.scopeStamp());
+        if(result.isObject()){
+            var stats=((ObjectNode)result).withObject("/context");
+            stats.put("summaryCoveredMessageId",prepared.covered());stats.put("summaryUpdated",prepared.changed());stats.put("summaryFallback",prepared.failed());
+        }
+        new TransactionTemplate(tx).executeWithoutResult(status->{
+            if(jdbc.update("UPDATE knowledge_conversation SET run_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND run_id=?",pending.id(),access.actor(),pending.run())==0)throw new BusinessException(409,"对话已删除或取消");
+            jdbc.update("UPDATE knowledge_message SET status='SUCCEEDED' WHERE id=?",pending.message());
+            keys.insert("INSERT INTO knowledge_message(conversation_id,role,content,sources_json,status) VALUES(?,'assistant',?,?,'SUCCEEDED')",pending.id(),result.path("answer").asText(),result.path("sources").toString());
+            memory.save(pending.id(),prepared);
+        });
+    }
+
+    private void fail(Pending pending){
+        jdbc.update("UPDATE knowledge_message SET status='FAILED' WHERE id=?",pending.message());
+        jdbc.update("UPDATE knowledge_conversation SET run_id=NULL WHERE id=? AND run_id=?",pending.id(),pending.run());
+    }
+
+    public JsonNode send(long id,String question){
+        var pending=begin(id,question);
         try{
-            var prepared=memory.prepare(id,eligible,scopeStamp);
-            ensureContext(id,initialScopes,ids,scope.path("publicOnly").asBoolean(),historyStamp,scopeStamp);
-            var query=new KnowledgeSearch.Query(question,ids,scope.path("publicOnly").asBoolean(),scope.path("searchMode").asText("hybrid"),(String)conversation.get("mode"),10,scope.path("rerank").asBoolean(true),null);
-            var result=search.runConversation(query,history,prepared.memory());
-            ensureContext(id,initialScopes,ids,scope.path("publicOnly").asBoolean(),historyStamp,scopeStamp);
-            if(result.isObject()){
-                var stats=((ObjectNode)result).withObject("/context");
-                stats.put("summaryCoveredMessageId",prepared.covered());stats.put("summaryUpdated",prepared.changed());stats.put("summaryFallback",prepared.failed());
-            }
-            new TransactionTemplate(tx).executeWithoutResult(status->{
-                if(jdbc.update("UPDATE knowledge_conversation SET run_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND run_id=?",id,access.actor(),run)==0)throw new BusinessException(409,"对话已删除或取消");
-                jdbc.update("UPDATE knowledge_message SET status='SUCCEEDED' WHERE id=?",message);
-                keys.insert("INSERT INTO knowledge_message(conversation_id,role,content,sources_json,status) VALUES(?,'assistant',?,?,'SUCCEEDED')",id,result.path("answer").asText(),result.path("sources").toString());
-                memory.save(id,prepared);
-            });return result;
-        }catch(RuntimeException error){jdbc.update("UPDATE knowledge_message SET status='FAILED' WHERE id=?",message);jdbc.update("UPDATE knowledge_conversation SET run_id=NULL WHERE id=? AND run_id=?",id,run);throw error;}
+            var prepared=memory.prepare(id,pending.eligible(),pending.scopeStamp());
+            ensureContext(id,pending.initialScopes(),pending.ids(),pending.published(),pending.historyStamp(),pending.scopeStamp());
+            var query=new KnowledgeSearch.Query(question,pending.ids(),pending.published(),pending.searchMode(),pending.mode(),10,pending.rerank(),null);
+            var result=search.runConversation(query,pending.history(),prepared.memory());
+            complete(pending,prepared,result);
+            return result;
+        }catch(RuntimeException error){fail(pending);throw error;}
+    }
+
+    /** Streams start/delta/reset preview frames, then one done frame with the persisted answer.
+     * Runs on the request thread so access checks and transactions keep their context. */
+    public void sendStream(long id,String question,jakarta.servlet.http.HttpServletResponse response) throws java.io.IOException {
+        var pending=begin(id,question);
+        response.setContentType("text/event-stream;charset=UTF-8");
+        response.setHeader("Cache-Control","no-cache");
+        response.setHeader("X-Accel-Buffering","no");
+        var writer=response.getWriter();
+        try{
+            writer.write("event: start\ndata: {\"mode\":"+json.writeValueAsString(pending.mode())+"}\n\n");writer.flush();
+            var prepared=memory.prepare(id,pending.eligible(),pending.scopeStamp());
+            ensureContext(id,pending.initialScopes(),pending.ids(),pending.published(),pending.historyStamp(),pending.scopeStamp());
+            var query=new KnowledgeSearch.Query(question,pending.ids(),pending.published(),pending.searchMode(),pending.mode(),10,pending.rerank(),null);
+            var result=search.runConversationStream(query,pending.history(),prepared.memory(),(event,data)->{
+                // PrintWriter swallows IO errors; checkError() is the only disconnect signal.
+                writer.write("event: "+event+"\ndata: "+data+"\n\n");writer.flush();
+                if(writer.checkError())throw new IllegalStateException("客户端已断开");
+            });
+            complete(pending,prepared,result);
+            writer.write("event: done\ndata: "+result+"\n\n");writer.flush();
+        }catch(RuntimeException error){
+            fail(pending);
+            var payload=json.createObjectNode();payload.put("message",error.getMessage()==null?"生成失败，请重试":error.getMessage());
+            writer.write("event: error\ndata: "+payload+"\n\n");writer.flush();
+        }
     }
     private void ensureContext(long id,List<Map<String,Object>> scopes,List<Long> ids,boolean published,String expected,String stamp){
         access.active();

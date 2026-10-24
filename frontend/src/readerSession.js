@@ -10,7 +10,7 @@ export function createReaderSession({ request, hasToken, state, conversations })
 
   function conversation(key, privateScope = false) {
     const chat = conversations[key] ||= {
-      question: "", messages: [], busy: false, error: "", privateScope: false,
+      question: "", messages: [], busy: false, error: "", streamPreview: "", privateScope: false,
     };
     if (privateScope) chat.privateScope = true;
     return chat;
@@ -94,6 +94,7 @@ export function createReaderSession({ request, hasToken, state, conversations })
         }
       }
       chat.busy = false;
+      chat.streamPreview = "";
     }
     return { privateDocument };
   }

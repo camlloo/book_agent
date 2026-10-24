@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -152,7 +153,7 @@ async def pdf(request: TextRequest):
     return Response(await asyncio.to_thread(export_pdf, request.title, request.content), media_type="application/pdf")
 
 
-from .knowledge import KnowledgeRequest, search as knowledge_search, answer as knowledge_answer
+from .knowledge import KnowledgeRequest, search as knowledge_search, answer as knowledge_answer, answer_stream as knowledge_answer_stream
 from .assistant import AssistantRequest, run as run_assistant
 from .context_memory import CompactRequest, compact
 
@@ -177,6 +178,38 @@ async def ask_knowledge(request: KnowledgeRequest):
         except IndexNotReady as error: raise HTTPException(409,str(error)) from None
         except ModelUnavailable as error: raise HTTPException(503,str(error)) from None
         except Exception: raise HTTPException(503,"全库问答服务不可用，请检查向量库与模型") from None
+
+
+def _sse(event: str, data) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/internal/knowledge/ask/stream", dependencies=[Depends(internal_auth)])
+async def ask_knowledge_stream(request: KnowledgeRequest):
+    """Server-sent events: start/delta/reset preview chunks, then one done frame
+    with the validated full result (same shape as /internal/knowledge/ask), or error."""
+    from fastapi.responses import StreamingResponse
+
+    async def events():
+        async with capacity:
+            try:
+                yield _sse("start", {"mode": request.mode})
+                async for kind, value in knowledge_answer_stream(request, provider):
+                    if kind == "final":
+                        yield _sse("done", value)
+                    elif kind == "reset":
+                        yield _sse("reset", {})
+                    else:
+                        yield _sse("delta", {"text": value})
+            except IndexNotReady as error:
+                yield _sse("error", {"message": str(error)})
+            except ModelUnavailable as error:
+                yield _sse("error", {"message": str(error)})
+            except Exception:
+                yield _sse("error", {"message": "全库问答服务不可用，请检查向量库与模型"})
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/internal/assistant", dependencies=[Depends(internal_auth)])

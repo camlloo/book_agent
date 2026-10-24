@@ -45,6 +45,79 @@ export function query(values) {
     if (value !== "" && value != null) params.set(key, value);
   return params.toString();
 }
+
+function parseSseFrame(frame) {
+  let name = null;
+  const data = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) name = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (!data.length) return null;
+  try {
+    return { name, data: JSON.parse(data.join("\n")) };
+  } catch {
+    return null;
+  }
+}
+
+/** POST an SSE stream with the session header. onEvent(name, data) sees every
+ * frame; the returned value is the done payload, or null when aborted. */
+export async function streamApi(path, { body, onEvent, signal } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  const token = sessionStorage.getItem("book-agent-token");
+  if (token) headers.Authorization = token;
+  let response;
+  try {
+    response = await fetch((import.meta.env.VITE_API_BASE || "") + path, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (e) {
+    if (signal?.aborted) return null;
+    throw new Error("无法连接服务，请检查后端是否启动后重试。");
+  }
+  const type = response.headers.get("content-type") || "";
+  if (type.includes("application/json")) {
+    // Rejections before the stream starts arrive as the regular JSON envelope.
+    let envelope = {};
+    try { envelope = await response.json(); } catch {}
+    const code = envelope.code || response.status;
+    if (code === 401 && token && sessionStorage.getItem("book-agent-token") === token) {
+      sessionStorage.removeItem("book-agent-token");
+      window.dispatchEvent(new Event("book-agent-session-expired"));
+    }
+    throw new Error(envelope.message || "请求失败，请重试。");
+  }
+  if (!response.ok || !response.body) throw new Error("当前环境不支持流式接收，请稍后重试。");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let done = null;
+  const handle = (frame) => {
+    const parsed = parseSseFrame(frame);
+    if (!parsed) return;
+    if (parsed.name === "done") done = parsed.data;
+    else if (parsed.name === "error")
+      throw new Error(parsed.data.message || "生成失败，请重试。");
+    else onEvent?.(parsed.name, parsed.data);
+  };
+  while (true) {
+    const { value, done: finished } = await reader.read();
+    if (finished) break;
+    buffer += decoder.decode(value, { stream: true });
+    let index;
+    while ((index = buffer.indexOf("\n\n")) >= 0) {
+      const frame = buffer.slice(0, index);
+      buffer = buffer.slice(index + 2);
+      handle(frame);
+    }
+  }
+  if (buffer.trim()) handle(buffer);
+  return done;
+}
 export async function action(work) {
   try {
     return await work();
